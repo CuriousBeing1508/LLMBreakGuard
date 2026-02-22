@@ -1,0 +1,48 @@
+name: 'LLMBreakGuard'
+description: 'Detects breaking changes in your projects whenever you update an OSS library through LLM-generated tests'
+
+inputs:
+  config-file:
+    description: 'Path to your minimal bc-config.csv relative to the repo root'
+    required: true
+    default: 'bc-config.csv'
+  mode:
+    description: '"detect" to preview and confirm auto-detected config, "run" to execute full pipeline'
+    required: false
+    default: 'detect'
+  resolved-config-file:
+    description: 'Path to the reviewed and confirmed resolved config (used in run mode)'
+    required: false
+    default: 'bc-config-resolved.csv'
+  llm-api-key:
+    description: 'Your LLM API key'
+    required: true
+  llm-model:
+    description: 'LLM model to use for test generation'
+    required: false
+    default: 'gpt-4o' 
+
+outputs:
+  bc-report:
+    description: 'Path to the full breaking change detection report'
+  tests-transplanted:
+    description: 'Number of test classes successfully transplanted'
+  tests-passed:
+    description: 'Number of generated BC detector tests that passed'
+  tests-failed:
+    description: 'Number of generated BC detector tests that failed'
+
+runs:
+  using: 'docker'
+  image: 'Dockerfile'
+  args:
+    - ${{ inputs.config-file }}
+    - ${{ inputs.mode }}
+    - ${{ inputs.resolved-config-file }}
+  env:
+    LLM_API_KEY: ${{ inputs.llm-api-key }}
+    LLM_MODEL:   ${{ inputs.llm-model }}
+
+branding:
+  icon: 'shield'
+  color: 'red'
