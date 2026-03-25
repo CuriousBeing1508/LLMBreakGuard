@@ -1,48 +1,243 @@
-name: 'LLMBreakGuard'
-description: 'Detects breaking changes in your projects whenever you update an OSS library through LLM-generated tests'
+name: LLMBreakGuard
+description: >
+  Detects breaking changes in OSS library upgrades using Spoon
+  static analysis and LLM-generated tests. Runs generated tests
+  against both the old and new library versions in isolated Docker
+  containers and reports which API calls break.
 
 inputs:
   config-file:
-    description: 'Path to your minimal bc-config.csv relative to the repo root'
+    description: >
+      Path to bc-config.csv relative to the repo root.
+      Contains the library upgrade details to analyze.
     required: true
-    default: 'bc-config.csv'
-  mode:
-    description: '"detect" to preview and confirm auto-detected config, "run" to execute full pipeline'
-    required: false
-    default: 'detect'
-  resolved-config-file:
-    description: 'Path to the reviewed and confirmed resolved config (used in run mode)'
-    required: false
-    default: 'bc-config-resolved.csv'
-  llm-api-key:
-    description: 'Your LLM API key'
-    required: true
-  llm-model:
-    description: 'LLM model to use for test generation'
-    required: false
-    default: 'gpt-4o' 
+    default: bc-config.csv
 
-outputs:
-  bc-report:
-    description: 'Path to the full breaking change detection report'
-  tests-transplanted:
-    description: 'Number of test classes successfully transplanted'
-  tests-passed:
-    description: 'Number of generated BC detector tests that passed'
-  tests-failed:
-    description: 'Number of generated BC detector tests that failed'
+  mode:
+    description: >
+      detect: clones repo, auto-detects project info, writes
+      bc-config-resolved.csv to a review branch and stops.
+      run: reads bc-config-resolved.csv and executes the full
+      pipeline.
+    required: false
+    default: detect
+
+  resolved-config-file:
+    description: >
+      Path to bc-config-resolved.csv relative to repo root.
+      Created by detect mode. Reviewed and confirmed by user
+      before run mode.
+    required: false
+    default: bc-config-resolved.csv
+
+  llm-api-key:
+    description: >
+      Anthropic API key for LLM test generation.
+      Pass as a secret: ${{ secrets.ANTHROPIC_API_KEY }}
+    required: true
+
+  llm-model:
+    description: >
+      Anthropic model to use for test generation.
+    required: false
+    default: claude-sonnet-4-6
 
 runs:
-  using: 'docker'
-  image: 'Dockerfile'
-  args:
-    - ${{ inputs.config-file }}
-    - ${{ inputs.mode }}
-    - ${{ inputs.resolved-config-file }}
-  env:
-    LLM_API_KEY: ${{ inputs.llm-api-key }}
-    LLM_MODEL:   ${{ inputs.llm-model }}
+  using: composite
+  steps:
+
+    # ── detect mode ──────────────────────────────────────────
+
+    - name: Parse config
+      if: inputs.mode == 'detect'
+      shell: bash
+      run: |
+        mkdir -p /tmp/llmbreakguard
+        python3 ${{ github.action_path }}/src/pipeline/parse_config.py \
+          "${{ github.workspace }}/${{ inputs.config-file }}" \
+          > /tmp/llmbreakguard/configs.json
+
+    - name: Clone repos and detect project info
+      if: inputs.mode == 'detect'
+      shell: bash
+      run: |
+        python3 ${{ github.action_path }}/src/pipeline/detect_project_info.py \
+          /tmp/llmbreakguard/configs.json \
+          "${{ github.workspace }}" \
+          > /tmp/llmbreakguard/detected.json
+
+    - name: Write resolved config
+      if: inputs.mode == 'detect'
+      shell: bash
+      run: |
+        python3 ${{ github.action_path }}/src/pipeline/write_resolved_csv.py \
+          /tmp/llmbreakguard/configs.json \
+          /tmp/llmbreakguard/detected.json \
+          "${{ github.workspace }}/${{ inputs.resolved-config-file }}"
+
+    - name: Commit resolved config for review
+      if: inputs.mode == 'detect'
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ github.token }}
+      run: |
+        bash ${{ github.action_path }}/scripts/commit_resolved_config.sh \
+          "${{ inputs.resolved-config-file }}" \
+          "${{ github.workspace }}"
+        echo ""
+        echo "detect mode complete"
+        echo "please review ${{ inputs.resolved-config-file }} on the review branch"
+        echo "confirm or edit these auto-detected fields:"
+        echo "  - testing_framework"
+        echo "  - test_source_root"
+        echo "  - llm_tests_folder"
+        echo "  - import_prefix  (derived — validate carefully)"
+        echo "then re-run this workflow with mode: run"
+        exit 1
+
+    # ── run mode ─────────────────────────────────────────────
+
+    - name: Parse resolved config
+      if: inputs.mode == 'run'
+      shell: bash
+      run: |
+        mkdir -p /tmp/llmbreakguard
+        python3 ${{ github.action_path }}/src/pipeline/parse_config.py \
+          "${{ github.workspace }}/${{ inputs.resolved-config-file }}" \
+          --resolved \
+          > /tmp/llmbreakguard/configs.json
+
+    - name: Run Spoon static analysis
+      if: inputs.mode == 'run'
+      shell: bash
+      run: |
+        python3 ${{ github.action_path }}/src/pipeline/run_static_analysis.py \
+          /tmp/llmbreakguard/configs.json \
+          "${{ github.workspace }}" \
+          /tmp/llmbreakguard/analysis
+
+    - name: Generate manifest
+      if: inputs.mode == 'run'
+      shell: bash
+      run: |
+        python3 ${{ github.action_path }}/src/pipeline/generate_manifest.py \
+          /tmp/llmbreakguard/configs.json \
+          /tmp/llmbreakguard/analysis \
+          /tmp/llmbreakguard/staged_tests \
+          "${{ github.workspace }}" \
+          /tmp/llmbreakguard/manifest.json
+
+    - name: Generate prompts
+      if: inputs.mode == 'run'
+      shell: bash
+      run: |
+        python3 ${{ github.action_path }}/src/pipeline/generate_prompt.py \
+          /tmp/llmbreakguard/manifest.json
+
+    - name: Generate tests via LLM
+      if: inputs.mode == 'run'
+      shell: bash
+      env:
+        LLM_API_KEY: ${{ inputs.llm-api-key }}
+        LLM_MODEL:   ${{ inputs.llm-model }}
+      run: |
+        python3 ${{ github.action_path }}/src/pipeline/prompt_llm.py \
+          /tmp/llmbreakguard/manifest.json
+
+    - name: Transplant tests
+      if: inputs.mode == 'run'
+      shell: bash
+      run: |
+        # transplant per row using client dirs from manifest
+        python3 -c "
+        import json
+        with open('/tmp/llmbreakguard/manifest.json') as f:
+            manifest = json.load(f)
+        for row in manifest['rows']:
+            i          = row['row_index'] - 1
+            client_name = row['client_name']
+            print(f\"{i} {client_name}\")
+        " | while read ROW_IDX CLIENT_NAME; do
+            python3 ${{ github.action_path }}/src/pipeline/transplant_tests.py \
+                /tmp/llmbreakguard/manifest.json \
+                "${{ github.workspace }}/clients/${CLIENT_NAME}_${ROW_IDX}" \
+                /tmp/llmbreakguard/results_${ROW_IDX}
+        done
+
+    - name: Build executor images and run pre and breaking stages
+      if: inputs.mode == 'run'
+      shell: bash
+      run: |
+        python3 -c "
+        import json
+        with open('/tmp/llmbreakguard/configs.json') as f:
+            configs = json.load(f)
+        with open('/tmp/llmbreakguard/manifest.json') as f:
+            manifest = json.load(f)
+        for i, (c, r) in enumerate(zip(configs, manifest['rows'])):
+            print(
+                i,
+                r['client_name'],
+                c['java_version'],
+                c['build_tool_version'],
+                c['library_group_id'],
+                c['library_name'],
+                c['old_version'],
+                c['new_version']
+            )
+        " | while read ROW CLIENT_NAME JAVA MAVEN GROUP NAME OLD NEW; do
+            bash ${{ github.action_path }}/scripts/build_and_run_executors.sh \
+                ${{ github.action_path }} \
+                "${{ github.workspace }}/clients/${CLIENT_NAME}_${ROW}" \
+                "/tmp/llmbreakguard/staged_tests/staged_${ROW}" \
+                "/tmp/llmbreakguard/results_${ROW}" \
+                $ROW \
+                $JAVA \
+                $MAVEN \
+                $GROUP \
+                $NAME \
+                $OLD \
+                $NEW
+        done
+
+    - name: Compare results
+      if: inputs.mode == 'run'
+      shell: bash
+      run: |
+        python3 -c "
+        import json
+        with open('/tmp/llmbreakguard/manifest.json') as f:
+            manifest = json.load(f)
+        for row in manifest['rows']:
+            i = row['row_index'] - 1
+            print(i)
+        " | while read ROW_IDX; do
+            python3 ${{ github.action_path }}/src/detection/compare_results.py \
+                /tmp/llmbreakguard/results_${ROW_IDX}/pre_results.json \
+                /tmp/llmbreakguard/results_${ROW_IDX}/breaking_results.json \
+                /tmp/llmbreakguard/manifest.json \
+                /tmp/llmbreakguard/results_${ROW_IDX}/bc_report_${ROW_IDX}.json
+        done
+
+    - name: Generate report
+      if: inputs.mode == 'run'
+      shell: bash
+      env:
+        GITHUB_STEP_SUMMARY: ${{ github.step_summary }}
+      run: |
+        python3 ${{ github.action_path }}/src/reporting/generate_report.py \
+          /tmp/llmbreakguard \
+          /tmp/llmbreakguard/bc_report.json
+
+    - name: Upload BC report
+      if: inputs.mode == 'run'
+      uses: actions/upload-artifact@v4
+      with:
+        name: llmbreakguard-report
+        path: |
+          /tmp/llmbreakguard/bc_report.json
+          /tmp/llmbreakguard/bc_report.md
 
 branding:
-  icon: 'shield'
-  color: 'red'
+  icon: shield
+  color: red

@@ -1,0 +1,34 @@
+# workflow-template.yml
+# Copy this file to your project at:
+# .github/workflows/bc-check.yml
+# and fill in your details.
+
+name: Check Breaking Changes
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'detect or run'
+        required: true
+        default: detect
+        type: choice
+        options:
+          - detect
+          - run
+
+jobs:
+  bc-check:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: your-org/LLMBreakGuard@v1
+        with:
+          config-file:          bc-config.csv
+          mode:                 ${{ inputs.mode }}
+          resolved-config-file: bc-config-resolved.csv
+          llm-api-key:          ${{ secrets.ANTHROPIC_API_KEY }}

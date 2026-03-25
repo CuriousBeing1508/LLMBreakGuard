@@ -1,0 +1,89 @@
+# Dockerfile.pre
+#
+# PURPOSE:
+#   Builds the PRE version image for a client project.
+#   Client code is used as-is since pre_breaking_commit already
+#   has the old library version in pom.xml.
+#
+# DESIGN DECISIONS:
+#   1. MVN COMPILE AT BUILD TIME, TEST COMPILE AT RUNTIME
+#      Client main classes are compiled during image build so they
+#      are available on the classpath when test files are compiled
+#      individually at runtime.
+#      Reason: test files are compiled one by one to identify which
+#      ones compile cleanly. If test-compile ran at build time one
+#      bad generated test would fail the entire image build.
+#
+#   2. CLASSPATH RESOLVED ONCE AT BUILD TIME
+#      mvn dependency:build-classpath saves the full classpath to
+#      /project/test-classpath.txt during image build.
+#      Reason: resolving classpath per test file via Maven is slow.
+#      Saving it once means each per-file javac call just reads the
+#      file. Fast and reliable.
+#
+#   3. CLIENT CODE COPIED AS-IS
+#      No version modification. pre_breaking_commit already has the
+#      old library version declared in pom.xml.
+#      This is the baseline we compile and run tests against.
+#
+#   4. GENERATED TESTS NOT IN IMAGE
+#      Generated test files are NOT copied into the image.
+#      They are mounted at runtime by compile_tests.py and
+#      execute_pre.py via docker run -v.
+#      Reason: keeps the image reusable. Tests can be fixed and
+#      rerun without rebuilding the image.
+#
+#   5. SDKMAN FOR VERSION MANAGEMENT
+#      Java and Maven versions are passed as build args from
+#      bc-config-resolved.csv and installed via SDKMAN.
+#      Reason: client projects vary in Java and Maven requirements.
+#
+#   6. PMD CHECKSTYLE ENFORCER SKIPPED
+#      Static analysis and style checks are skipped during build.
+#      Reason: these checks are irrelevant for BC detection and
+#      can cause false build failures unrelated to our goal.
+
+FROM python:3.11-slim
+
+ARG JAVA_VERSION=17
+ARG MAVEN_VERSION=3.9.6
+
+RUN apt-get update && apt-get install -y \
+    wget unzip curl zip git \
+    && rm -rf /var/lib/apt/lists/*
+
+# install SDKMAN and required versions
+RUN curl -s "https://get.sdkman.io" | bash
+ENV SDKMAN_DIR="/root/.sdkman"
+ENV PATH="${SDKMAN_DIR}/candidates/java/current/bin:${SDKMAN_DIR}/candidates/maven/current/bin:${PATH}"
+
+RUN bash -c "source /root/.sdkman/bin/sdkman-init.sh \
+    && sdk install java ${JAVA_VERSION}-tem \
+    && sdk use java ${JAVA_VERSION}-tem \
+    && sdk install maven ${MAVEN_VERSION} \
+    && sdk use maven ${MAVEN_VERSION}"
+
+# copy client project (without generated tests)
+COPY . /project
+WORKDIR /project
+
+# compile client main classes
+RUN bash -c "source /root/.sdkman/bin/sdkman-init.sh \
+    && mvn compile \
+        -Dpmd.skip=true \
+        -Dcheckstyle.skip=true \
+        -Denforcer.skip=true \
+        -q"
+
+# resolve and save full test classpath once
+# this file is read by compile_tests.py per test file
+RUN bash -c "source /root/.sdkman/bin/sdkman-init.sh \
+    && mvn dependency:build-classpath \
+        -DincludeScope=test \
+        -Dmdep.outputFile=/project/test-classpath.txt \
+        -q"
+
+# copy runtime scripts
+COPY scripts/compile_tests.sh /compile_tests.sh
+COPY scripts/execute_tests.sh /execute_tests.sh
+RUN chmod +x /compile_tests.sh /execute_tests.sh

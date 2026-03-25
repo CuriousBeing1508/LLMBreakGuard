@@ -1,0 +1,109 @@
+# Dockerfile.breaking
+#
+# PURPOSE:
+#   Builds the BREAKING version image for a client project.
+#   Identical to Dockerfile.pre except the library version is
+#   bumped to new_version before compiling.
+#
+# DESIGN DECISIONS:
+#   1. VERSION SWAP BEFORE MVN COMPILE
+#      Library version is swapped in pom.xml before mvn compile
+#      so all compiled classes and resolved dependencies use the
+#      new library version.
+#      Reason: we need the breaking version on the classpath when
+#      test files compile and execute. Swapping after compile would
+#      give us old version classes with new version tests.
+#
+#   2. MAVEN VERSIONS PLUGIN WITH SED FALLBACK
+#      Attempts mvn versions:use-dep-version first which handles
+#      both hardcoded and property-based version declarations.
+#      Falls back to sed if versions plugin fails (BOM managed,
+#      parent pom, etc.).
+#      Reason: robustness across different project structures
+#      without requiring user intervention.
+#
+#   3. COMPILATION FAILURE RECORDED NOT FATAL
+#      If mvn compile fails after version swap it means the new
+#      library version introduced an incompatible API change at
+#      the source level. This is itself a breaking change signal.
+#      The failure is recorded to /project/compile_status.txt
+#      and handled gracefully by execute_tests.sh.
+#      Reason: a hard Docker build failure would prevent the
+#      action from generating a useful report. Recording it
+#      allows compare_results.py to flag it as a compilation BC.
+#
+#   4. GENERATED TESTS NOT IN IMAGE
+#      Same as Dockerfile.pre — tests are mounted at runtime.
+#      Reason: same image can be reused if tests are regenerated
+#      without rebuilding the entire breaking image.
+#
+#   5. CLASSPATH RESOLVED AFTER VERSION SWAP
+#      Classpath is resolved after the version swap so it
+#      reflects the new library version dependencies.
+#      Reason: new library version may have different transitive
+#      dependencies. Classpath must match what will be executed.
+
+FROM python:3.11-slim
+
+ARG JAVA_VERSION=17
+ARG MAVEN_VERSION=3.9.6
+ARG OLD_VERSION
+ARG NEW_VERSION
+ARG LIBRARY_GROUP_ID
+ARG LIBRARY_NAME
+
+RUN apt-get update && apt-get install -y \
+    wget unzip curl zip git \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN curl -s "https://get.sdkman.io" | bash
+ENV SDKMAN_DIR="/root/.sdkman"
+ENV PATH="${SDKMAN_DIR}/candidates/java/current/bin:${SDKMAN_DIR}/candidates/maven/current/bin:${PATH}"
+
+RUN bash -c "source /root/.sdkman/bin/sdkman-init.sh \
+    && sdk install java ${JAVA_VERSION}-tem \
+    && sdk use java ${JAVA_VERSION}-tem \
+    && sdk install maven ${MAVEN_VERSION} \
+    && sdk use maven ${MAVEN_VERSION}"
+
+COPY . /project
+WORKDIR /project
+
+# swap library version in pom.xml
+# try versions plugin first, fall back to sed
+RUN bash -c "source /root/.sdkman/bin/sdkman-init.sh \
+    && mvn versions:use-dep-version \
+        -Dincludes='${LIBRARY_GROUP_ID}:${LIBRARY_NAME}' \
+        -DdepVersion='${NEW_VERSION}' \
+        -DforceVersion=true \
+        -Dpmd.skip=true \
+        -Dcheckstyle.skip=true \
+        -Denforcer.skip=true \
+        -q \
+    || sed -i \
+        's|<version>${OLD_VERSION}<\/version>|<version>${NEW_VERSION}<\/version>|g' \
+        /project/pom.xml"
+
+# compile client main classes with new library version
+# record failure instead of failing the build
+# reason: compilation failure itself is a breaking change signal
+RUN bash -c "source /root/.sdkman/bin/sdkman-init.sh \
+    && mvn compile \
+        -Dpmd.skip=true \
+        -Dcheckstyle.skip=true \
+        -Denforcer.skip=true \
+        -q \
+    && echo 'passed' > /project/compile_status.txt \
+    || echo 'failed' > /project/compile_status.txt"
+
+# resolve classpath after version swap so it reflects
+# new library version and its transitive dependencies
+RUN bash -c "source /root/.sdkman/bin/sdkman-init.sh \
+    && mvn dependency:build-classpath \
+        -DincludeScope=test \
+        -Dmdep.outputFile=/project/test-classpath.txt \
+        -q"
+
+COPY scripts/compile_tests.sh /compile_tests.sh
+COPY scripts/execute_tests.sh /execute_tests.sh
+RUN chmod +x /compile_tests.sh /execute_tests.sh

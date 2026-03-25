@@ -1,0 +1,15 @@
+# LLMBreakGuard dependencies
+# install inside a virtual environment:
+#   python3 -m venv .venv
+#   source .venv/bin/activate
+#   pip install -r requirements.txt
+
+# Anthropic API for LLM test generation
+anthropic>=0.25.0
+
+# HTTP requests
+requests>=2.31.0
+
+# local development only — reads .env file for credentials
+# not needed in GitHub Actions (secrets injected automatically)
+python-dotenv>=1.0.0

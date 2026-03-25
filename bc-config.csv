@@ -1,0 +1,2 @@
+client_github_url,pre_breaking_commit,library_group_id,library_name,old_version,new_version,java_version,build_tool,build_tool_version
+https://github.com/versly/wsdoc/pull/77,8776fe7cd60bd309daf843bc70608ebf963c6761,com.fasterxml.jackson.core,jackson-databind,2.4.2,2.12.6.1,17,maven,3.9
