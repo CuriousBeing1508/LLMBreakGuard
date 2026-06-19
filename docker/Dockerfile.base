@@ -1,0 +1,20 @@
+FROM python:3.11-slim
+
+RUN apt-get update && apt-get install -y \
+    wget unzip curl zip git \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN curl -s "https://get.sdkman.io" | bash
+ENV SDKMAN_DIR="/root/.sdkman"
+ENV PATH="${SDKMAN_DIR}/candidates/java/current/bin:${SDKMAN_DIR}/candidates/maven/current/bin:${PATH}"
+
+RUN bash -c "source /root/.sdkman/bin/sdkman-init.sh \
+    && sdk install java 17.0.9-tem \
+    && sdk install maven 3.9.6"
+
+COPY scripts/compile_tests.sh /compile_tests.sh
+COPY scripts/execute_tests.sh /execute_tests.sh
+COPY scripts/run_tests_pre.sh /run_tests_pre.sh
+COPY scripts/run_tests_breaking.sh /run_tests_breaking.sh
+RUN chmod +x /compile_tests.sh /execute_tests.sh \
+             /run_tests_pre.sh /run_tests_breaking.sh

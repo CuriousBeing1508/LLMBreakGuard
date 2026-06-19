@@ -60,6 +60,9 @@ import time
 import anthropic
 from datetime import datetime
 from pathlib import Path
+from dotenv import load_dotenv
+
+load_dotenv()  # loads .env file into environment
 
 REQUEST_DELAY    = 2.0
 MAX_OUTPUT_TOKENS = 32768
@@ -82,7 +85,6 @@ class Logger:
     def flush(self):
         self.terminal.flush()
         self.log.flush()
-
 
 def init_client():
     api_key = os.environ.get("LLM_API_KEY")

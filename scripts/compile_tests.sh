@@ -112,9 +112,11 @@ with open('$RESULTS_FILE', 'w') as f:
     exit 0
 fi
 
-COMPILED=()
-FAILED=()
-FAILED_ERRORS=()
+COMPILE_NDJSON=/tmp/compile_entries.ndjson
+rm -f "$COMPILE_NDJSON"
+
+COMPILED_COUNT=0
+FAILED_COUNT=0
 
 for TEST_FILE in $TEST_FILES; do
     CLASS_NAME=$(basename $TEST_FILE .java)
@@ -130,44 +132,54 @@ for TEST_FILE in $TEST_FILES; do
 
     if [ $EXIT_CODE -eq 0 ]; then
         echo "  $CLASS_NAME -> compiled"
-        COMPILED+=("$TEST_FILE")
+        python3 -c "
+import json, sys
+print(json.dumps({'status': 'compiled', 'file': sys.argv[1]}))
+" "$TEST_FILE" >> "$COMPILE_NDJSON"
+        COMPILED_COUNT=$((COMPILED_COUNT + 1))
     else
         echo "  $CLASS_NAME -> failed"
         echo "  error: $OUTPUT"
-        FAILED+=("$TEST_FILE")
-        FAILED_ERRORS+=("$OUTPUT")
+        python3 -c "
+import json, sys
+print(json.dumps({'status': 'failed', 'file': sys.argv[1], 'error': sys.argv[2]}))
+" "$TEST_FILE" "$OUTPUT" >> "$COMPILE_NDJSON"
+        FAILED_COUNT=$((FAILED_COUNT + 1))
     fi
 done
 
 echo ""
-echo "compile results: ${#COMPILED[@]} compiled, ${#FAILED[@]} failed"
+echo "compile results: $COMPILED_COUNT compiled, $FAILED_COUNT failed"
 
-# write results as JSON
 python3 -c "
-import json, sys
+import json
+from pathlib import Path
 
-compiled      = sys.argv[1].split('|') if sys.argv[1] else []
-failed        = sys.argv[2].split('|') if sys.argv[2] else []
-failed_errors = sys.argv[3].split('|') if sys.argv[3] else []
+entries = []
+ndjson = Path('$COMPILE_NDJSON')
+if ndjson.exists():
+    for line in ndjson.read_text().splitlines():
+        line = line.strip()
+        if line:
+            try:
+                entries.append(json.loads(line))
+            except json.JSONDecodeError:
+                pass
 
-compiled = [f for f in compiled if f]
-failed   = [f for f in failed   if f]
-
-failed_details = []
-for i, f in enumerate(failed):
-    failed_details.append({
-        'file':  f,
-        'error': failed_errors[i] if i < len(failed_errors) else ''
-    })
+compiled = [e['file'] for e in entries if e['status'] == 'compiled']
+failed_details = [
+    {'file': e['file'], 'error': e.get('error', '')}
+    for e in entries if e['status'] == 'failed'
+]
 
 result = {
     'main_compile_status': 'passed',
     'compiled': compiled,
     'failed':   failed_details,
     'summary': {
-        'total':    len(compiled) + len(failed),
+        'total':    len(compiled) + len(failed_details),
         'compiled': len(compiled),
-        'failed':   len(failed),
+        'failed':   len(failed_details),
         'main_compile_failed': False
     }
 }
@@ -176,7 +188,6 @@ with open('$RESULTS_FILE', 'w') as f:
     json.dump(result, f, indent=2)
 
 print(f'compile results written to $RESULTS_FILE')
-" \
-"$(IFS='|'; echo "${COMPILED[*]}")" \
-"$(IFS='|'; echo "${FAILED[*]}")" \
-"$(IFS='|'; echo "${FAILED_ERRORS[*]}")"
+"
+
+rm -f "$COMPILE_NDJSON"

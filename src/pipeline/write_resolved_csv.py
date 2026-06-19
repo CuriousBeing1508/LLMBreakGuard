@@ -176,15 +176,9 @@ def write_resolved_csv(all_resolved_json, output_path):
 
 
 if __name__ == "__main__":
-    """
-    Called from entrypoint.sh with two arguments:
-      sys.argv[1] -> JSON string of merged rows
-      sys.argv[2] -> output path for resolved CSV
-
-    The JSON string contains rows already merged by entrypoint.sh
-    using merge_row(). This script just prints the confirmation
-    table and writes the CSV.
-    """
+    # sys.argv[1] -> path to configs.json   (from parse_config.py)
+    # sys.argv[2] -> path to detected.json  (from detect_project_info.py)
+    # sys.argv[3] -> output path for bc-config-resolved.csv
     all_configs_path = sys.argv[1]   # /tmp/llmbreakguard/configs.json
     detected_path    = sys.argv[2]   # /tmp/llmbreakguard/detected.json
     output_path      = sys.argv[3]   # $GITHUB_WORKSPACE/bc-config-resolved.csv

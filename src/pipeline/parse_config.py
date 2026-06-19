@@ -12,14 +12,14 @@ USER_REQUIRED_FIELDS = [
     "new_version",
     "java_version",
     "build_tool",
-    "build_tool_version"
+    "build_tool_version",
+    "testing_framework",
+    "test_source_root",
+    "llm_tests_folder"
 ]
 
 RESOLVED_FIELDS = USER_REQUIRED_FIELDS + [
     "import_prefix",
-    "testing_framework",
-    "test_source_root",
-    "llm_tests_folder"
 ]
 
 VALID_BUILD_TOOLS = ["maven", "gradle"]

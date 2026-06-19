@@ -163,7 +163,7 @@ def generate_report(results_dir, output_path):
     results_dir = Path(results_dir)
 
     # collect all per-row bc reports
-    bc_report_files = sorted(results_dir.glob("bc_report_*.json"))
+    bc_report_files = sorted(results_dir.rglob("bc_report_*.json"))
 
     all_rows = []
     for report_file in bc_report_files:
@@ -171,13 +171,9 @@ def generate_report(results_dir, output_path):
             data = json.load(f)
         all_rows.extend(data.get("rows", []))
 
-    # if only one bc_report.json exists (single row)
-    if not bc_report_files:
-        single = results_dir / "bc_report.json"
-        if single.exists():
-            with open(single) as f:
-                data = json.load(f)
-            all_rows.extend(data.get("rows", []))
+    if not all_rows:
+        print(f"no bc_report_*.json files found under {results_dir}")
+        sys.exit(1)
 
     total_rows            = len(all_rows)
     rows_with_bc          = sum(1 for r in all_rows if r["verdict"] == "BREAKING CHANGES DETECTED")

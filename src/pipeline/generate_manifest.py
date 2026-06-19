@@ -2,52 +2,54 @@
 generate_manifest.py
 
 PURPOSE:
-    Reads Spoon analysis output and builds a manifest.json that serves as the
-    single source of truth for all downstream steps (prompt generation, LLM
-    calling, transplanting, test execution, result comparison).
+    Reads Spoon analysis output and builds manifest.json which
+    serves as the single source of truth for all downstream steps.
 
 DESIGN DECISIONS:
     1. TEST CLASS NAMING: R{row}C{class}U{usage}BCDetectorTest
-       - Row index    : which row in bc-config-resolved.csv
-       - Class index  : which class Spoon found in that project
-       - Usage index  : which usage block (method) within that class
-       - Reason: full class+method names cause file system path length issues
-                 and Maven Surefire parsing problems. Short indexed names avoid
-                 this while still being unique and traceable via the manifest.
+       Row index, class index, usage index keep names short.
+       Reason: full class+method names cause file system path
+       length issues and Maven Surefire parsing problems.
 
     2. TEST PACKAGE: {original_package}.llmtests
-       - All LLM generated tests live in a llmtests subpackage under the
-         original class package.
-       - Reason: cleanly separates generated tests from existing client tests,
-                 prevents name clashes, easy to target in Maven/Gradle with
-                 **/llmtests/* and easy to clean up after the run.
+       All LLM generated tests live in a llmtests subpackage.
+       Reason: cleanly separates generated tests from existing
+       client tests, prevents name clashes, easy to target with
+       **/llmtests/* pattern.
 
     3. ONE USAGE BLOCK = ONE TEST CLASS FILE
-       - Each method in the client class that uses the library = one usage block
-         from Spoon = one prompt to LLM = one generated test class file.
-       - Reason: keeps each test class focused on one focal method, making it
-                 easier to identify exactly which method triggers a BC.
+       Each method in the client class that uses the library =
+       one usage block from Spoon = one prompt = one test file.
+       Reason: keeps each test focused on one focal method making
+       it easier to identify exactly which method triggers a BC.
 
-    4. MANIFEST STRUCTURE: rows -> classes -> usage_blocks
-       - Mirrors the hierarchy: one config row -> multiple classes -> multiple
-         usage blocks per class.
-       - Every downstream script iterates this same hierarchy so nothing needs
-         to re-derive paths or indices independently.
+    4. SPOON OUTPUT PATH CONVENTION
+       Spoon writes output to:
+         analysis_root/analysis_{i}/row_{i+1}/UsageReport/*.json
+       This is driven by how SpoonPipeline.java uses --bump-id
+       and --analysis-root arguments.
 
-    5. STAGED PATH vs TRANSPLANT PATH
-       - staged_path:     where LLM output is written first (outside client repo)
-       - transplant_path: final destination inside the cloned client repo
-       - Reason: keeping them separate means LLM output is always inspectable
-                 independently of what got transplanted, useful for debugging.
+    5. FULL CLASS SOURCE READ HERE
+       Focal class source is read from the cloned repo and stored
+       in the manifest so prompt_llm.py does not need to access
+       the client repo directly.
+       Reason: single point of file I/O, all downstream scripts
+       work purely from the manifest.
 
-    6. FULL CLASS SOURCE IN MANIFEST
-       - The full focal class source code is read here and stored in the manifest
-         so prompt_llm.py does not need to know about the client repo path.
-       - Reason: single point of file I/O for source reading, all downstream
-                 scripts work purely from the manifest.
+    6. INNER CLASS SEPARATOR SANITIZED
+       $ in inner class names is replaced with nothing for test
+       class naming since $ is not valid in Java identifiers used
+       as filenames.
+
+    7. NO SILENT DEFAULTS FOR REQUIRED FIELDS
+       testing_framework, test_source_root, and llm_tests_folder
+       must be present in the config. If missing the script exits
+       with a clear error telling the user to run detect mode.
+       Reason: silently defaulting to junit5 when the project uses
+       testng causes all generated tests to fail compilation.
+       The user must always validate these fields via detect mode.
 """
 
-import os
 import sys
 import json
 from pathlib import Path
@@ -57,16 +59,22 @@ def package_to_path(package_name):
     return package_name.replace(".", "/")
 
 
+def extract_package_from_fqn(client_class_fqn):
+    parts = client_class_fqn.rsplit(".", 1)
+    if len(parts) == 2:
+        return parts[0]
+    return ""
+
+
 def read_focal_class_source(client_dir, file_path):
     """
-    Reads the full source code of the focal class from the cloned repo.
-    Tries direct path first, then recursive search if not found.
+    Reads full source of the focal class from the cloned repo.
+    Tries direct path first then recursive search as fallback.
     """
     direct = Path(client_dir) / file_path
     if direct.exists():
         return direct.read_text(encoding="utf-8", errors="replace")
 
-    # recursive fallback: file_path might have module prefix differences
     file_name = Path(file_path).name
     matches = [
         p for p in Path(client_dir).rglob(file_name)
@@ -79,26 +87,59 @@ def read_focal_class_source(client_dir, file_path):
     return f"// source not found for {file_path}"
 
 
-def extract_package_from_fqn(client_class_fqn):
+def find_usage_files(analysis_root, row_index):
     """
-    Extracts package name from fully qualified class name.
-    e.g. org.versly.rest.wsdoc.AnnotationProcessor -> org.versly.rest.wsdoc
-    Handles inner classes e.g. AnnotationProcessor$TypeVisitorImpl
+    Finds Spoon output JSON files for a given row.
+    Spoon writes to:
+      analysis_root/analysis_{i}/row_{row}/UsageReport/*.json
+    where i = row_index - 1
     """
-    parts = client_class_fqn.rsplit(".", 1)
-    if len(parts) == 2:
-        return parts[0]
-    return ""
+    i         = row_index - 1
+    row_id    = f"row_{row_index}"
+    usage_dir = Path(analysis_root) / f"analysis_{i}" / row_id / "UsageReport"
+
+    if not usage_dir.exists():
+        print(f"usage dir not found: {usage_dir}", file=sys.stderr)
+        return []
+
+    return list(usage_dir.glob("*.json"))
 
 
-def extract_simple_name(client_class_fqn):
+def validate_required_fields(entry, row_num):
     """
-    Extracts simple class name from FQN, sanitizing inner class separator.
-    e.g. org.versly.rest.wsdoc.AnnotationProcessor$TypeVisitorImpl
-      -> AnnotationProcessorTypeVisitorImpl
+    Validates that fields which must be confirmed by the user
+    are present. Exits with a clear error if any are missing.
+    These fields are detected in detect mode and confirmed by
+    the user before run mode — they must never be defaulted.
     """
-    simple = client_class_fqn.rsplit(".", 1)[-1]
-    return simple.replace("$", "")
+    required = {
+        "testing_framework": "junit5, junit4, or testng",
+        "test_source_root":  "e.g. src/test/java",
+        "llm_tests_folder":  "e.g. bc_generated_tests"
+    }
+
+    missing = []
+    for field, example in required.items():
+        if not entry.get(field, "").strip():
+            missing.append(f"  {field} ({example})")
+
+    if missing:
+        print(f"\nrow {row_num}: missing required fields:", file=sys.stderr)
+        for m in missing:
+            print(m, file=sys.stderr)
+        print(
+            f"\nthese fields must be confirmed by the user before running.",
+            file=sys.stderr
+        )
+        print(
+            f"run with mode: detect first to auto-detect them,",
+            file=sys.stderr
+        )
+        print(
+            f"then review bc-config-resolved.csv and re-run with mode: run",
+            file=sys.stderr
+        )
+        sys.exit(1)
 
 
 def generate_manifest(configs_path, analysis_root, staged_root,
@@ -112,33 +153,39 @@ def generate_manifest(configs_path, analysis_root, staged_root,
         row_num     = row_idx + 1
         client_name = entry["clone_url"].split("/")[-1].replace(".git", "")
         client_dir  = Path(workspace) / "clients" / f"{client_name}_{row_idx}"
-        analysis_dir = Path(analysis_root) / f"analysis_{row_idx}"
 
-        if not analysis_dir.exists():
-            print(f"row {row_num}: analysis directory not found at {analysis_dir}")
+        # validate required user-confirmed fields before doing anything
+        validate_required_fields(entry, row_num)
+
+        testing_framework = entry["testing_framework"]
+        test_source_root  = entry["test_source_root"]
+        llm_tests_folder  = entry["llm_tests_folder"]
+
+        print(f"\nrow {row_num}: {entry['client_github_url']}", file=sys.stderr)
+        print(f"  testing_framework : {testing_framework}", file=sys.stderr)
+        print(f"  test_source_root  : {test_source_root}", file=sys.stderr)
+        print(f"  llm_tests_folder  : {llm_tests_folder}", file=sys.stderr)
+
+        # find spoon output files
+        usage_files = find_usage_files(analysis_root, row_num)
+        if not usage_files:
+            print(f"row {row_num}: no usage files found", file=sys.stderr)
             sys.exit(1)
 
-        # Spoon produces one JSON file per project containing all usage blocks
-        analysis_files = list(analysis_dir.glob("*.json"))
-        if not analysis_files:
-            print(f"row {row_num}: no analysis files found in {analysis_dir}")
-            sys.exit(1)
-
-        # load all usage blocks from all analysis files
+        # load all usage blocks
         all_usage_blocks = []
-        for af in sorted(analysis_files):
-            with open(af) as f:
+        for uf in sorted(usage_files):
+            with open(uf) as f:
                 data = json.load(f)
             if isinstance(data, list):
                 all_usage_blocks.extend(data)
             else:
                 all_usage_blocks.append(data)
 
-        print(f"row {row_num}: {len(all_usage_blocks)} usage block(s) found")
-
-        # group usage blocks by clientClass so we can assign class index
-        classes_seen = {}
-        class_counter = 0
+        print(
+            f"  usage blocks      : {len(all_usage_blocks)}",
+            file=sys.stderr
+        )
 
         row_entry = {
             "row_index":          row_num,
@@ -151,13 +198,14 @@ def generate_manifest(configs_path, analysis_root, staged_root,
             "java_version":       entry["java_version"],
             "build_tool":         entry["build_tool"],
             "build_tool_version": entry["build_tool_version"],
-            "testing_framework":  entry["testing_framework"],
-            "test_source_root":   entry["test_source_root"],
-            "llm_tests_folder":   entry["llm_tests_folder"],
+            "testing_framework":  testing_framework,
+            "test_source_root":   test_source_root,
+            "llm_tests_folder":   llm_tests_folder,
             "classes":            []
         }
 
-        # track classes already added to row_entry for appending usage blocks
+        classes_seen  = {}
+        class_counter = 0
         class_entries = {}
 
         for block in all_usage_blocks:
@@ -166,52 +214,49 @@ def generate_manifest(configs_path, analysis_root, staged_root,
             method_name      = block.get("methodName", "")
 
             if not client_class_fqn:
-                print(f"row {row_num}: skipping block with no clientClass")
+                print(
+                    f"row {row_num}: skipping block with no clientClass",
+                    file=sys.stderr
+                )
                 continue
 
-            # assign class index if first time seeing this class
             if client_class_fqn not in classes_seen:
                 classes_seen[client_class_fqn] = class_counter
                 class_counter += 1
 
                 package_name      = extract_package_from_fqn(client_class_fqn)
                 test_package_name = f"{package_name}.llmtests"
-                pkg_path          = package_to_path(test_package_name)
 
                 class_entry = {
-                    "class_fqn":          client_class_fqn,
-                    "package_name":       package_name,
-                    "test_package_name":  test_package_name,
-                    "class_index":        classes_seen[client_class_fqn],
-                    "usage_blocks":       []
+                    "class_fqn":         client_class_fqn,
+                    "package_name":      package_name,
+                    "test_package_name": test_package_name,
+                    "class_index":       classes_seen[client_class_fqn],
+                    "usage_blocks":      []
                 }
                 row_entry["classes"].append(class_entry)
                 class_entries[client_class_fqn] = class_entry
             else:
-                class_entry   = class_entries[client_class_fqn]
-                package_name  = class_entry["package_name"]
+                class_entry       = class_entries[client_class_fqn]
+                package_name      = class_entry["package_name"]
                 test_package_name = class_entry["test_package_name"]
-                pkg_path      = package_to_path(test_package_name)
 
             class_idx   = classes_seen[client_class_fqn]
             usage_idx   = len(class_entry["usage_blocks"])
+            pkg_path    = package_to_path(test_package_name)
 
-            # R{row}C{class}U{usage}BCDetectorTest
             test_class_name = f"R{row_num}C{class_idx}U{usage_idx}BCDetectorTest"
             test_fqn        = f"{test_package_name}.{test_class_name}"
-            pkg_path        = package_to_path(test_package_name)
 
-            staged_path     = str(
+            staged_path = str(
                 Path(staged_root) / f"staged_{row_idx}" /
                 pkg_path / f"{test_class_name}.java"
             )
             transplant_path = str(
-                Path(entry["test_source_root"]) /
+                Path(test_source_root) /
                 pkg_path / f"{test_class_name}.java"
             )
 
-            # read full focal class source here so prompt_llm.py
-            # does not need to access the client repo directly
             focal_class_source = read_focal_class_source(client_dir, file_path)
 
             usage_block_entry = {
@@ -228,9 +273,12 @@ def generate_manifest(configs_path, analysis_root, staged_root,
 
             class_entry["usage_blocks"].append(usage_block_entry)
 
-            print(f"  R{row_num}C{class_idx}U{usage_idx} "
-                  f"-> {client_class_fqn}.{method_name}"
-                  f" -> {test_class_name}")
+            print(
+                f"  R{row_num}C{class_idx}U{usage_idx} "
+                f"-> {client_class_fqn}.{method_name} "
+                f"-> {test_class_name}",
+                file=sys.stderr
+            )
 
         manifest["rows"].append(row_entry)
 
@@ -243,19 +291,22 @@ def generate_manifest(configs_path, analysis_root, staged_root,
         for r in manifest["rows"]
         for c in r["classes"]
     )
-    print(f"\nmanifest generated")
-    print(f"  rows          : {len(manifest['rows'])}")
-    print(f"  total classes : {sum(len(r['classes']) for r in manifest['rows'])}")
-    print(f"  total tests   : {total_blocks}")
-    print(f"  written to    : {output_path}")
+    print(f"\nmanifest generated", file=sys.stderr)
+    print(f"  rows          : {len(manifest['rows'])}", file=sys.stderr)
+    print(
+        f"  total classes : {sum(len(r['classes']) for r in manifest['rows'])}",
+        file=sys.stderr
+    )
+    print(f"  total tests   : {total_blocks}", file=sys.stderr)
+    print(f"  written to    : {output_path}", file=sys.stderr)
 
 
 if __name__ == "__main__":
-    configs_path  = sys.argv[1]   # /tmp/llmbreakguard/configs.json
-    analysis_root = sys.argv[2]   # /tmp/llmbreakguard/analysis
-    staged_root   = sys.argv[3]   # /tmp/llmbreakguard/staged_tests
-    workspace     = sys.argv[4]   # $GITHUB_WORKSPACE
-    output_path   = sys.argv[5]   # /tmp/llmbreakguard/manifest.json
+    configs_path  = sys.argv[1]
+    analysis_root = sys.argv[2]
+    staged_root   = sys.argv[3]
+    workspace     = sys.argv[4]
+    output_path   = sys.argv[5]
 
     generate_manifest(configs_path, analysis_root, staged_root,
                       workspace, output_path)

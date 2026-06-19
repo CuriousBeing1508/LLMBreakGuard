@@ -71,6 +71,7 @@
 #   $10 -> old_version
 #   $11 -> new_version
 
+#!/bin/bash
 set -e
 
 ACTION_PATH=$1
@@ -90,58 +91,40 @@ BREAKING_IMAGE="llmbreakguard-breaking-${ROW_INDEX}"
 
 mkdir -p "$RESULTS_DIR"
 
-echo ""
-echo "row $ROW_INDEX: starting executor pipeline"
-echo "  library : $LIBRARY_GROUP_ID:$LIBRARY_NAME"
-echo "  versions: $OLD_VERSION -> $NEW_VERSION"
-echo "  java    : $JAVA_VERSION"
-echo "  maven   : $MAVEN_VERSION"
+# build base image once if not already built
+# base contains all scripts baked in
+if ! docker image inspect llmbreakguard-base:latest > /dev/null 2>&1; then
+    echo "row $ROW_INDEX: building base executor image"
+    docker build \
+        -f $ACTION_PATH/docker/Dockerfile.base \
+        -t llmbreakguard-base:latest \
+        $ACTION_PATH
+fi
 
-# ── build pre image ───────────────────────────────────────────
-echo ""
-echo "row $ROW_INDEX: building pre image"
+echo "row $ROW_INDEX: building pre image ($OLD_VERSION)"
 docker build \
     --build-arg JAVA_VERSION=$JAVA_VERSION \
     --build-arg MAVEN_VERSION=$MAVEN_VERSION \
-    -f $ACTION_PATH/docker/Dockerfile.pre \
+    -f $ACTION_PATH/docker/pre-version/Dockerfile.pre \
     -t $PRE_IMAGE \
     $CLIENT_DIR
 
-echo "row $ROW_INDEX: pre image built"
-
-# ── compile on pre ────────────────────────────────────────────
-echo ""
-echo "row $ROW_INDEX: compiling tests on pre ($OLD_VERSION)"
+echo "row $ROW_INDEX: running pre stage (compile + execute)"
 docker run --rm \
     -v "$STAGED_DIR:/staged:ro" \
     -v "$RESULTS_DIR:/results" \
     $PRE_IMAGE \
-    /compile_tests.sh \
-        /staged \
-        /results/compile_results_pre.json
+    bash -c "
+        source /root/.sdkman/bin/sdkman-init.sh && \
+        /compile_tests.sh /staged /results/compile_results_pre.json && \
+        /execute_tests.sh \
+            /results/compile_results_pre.json \
+            /results/fqn_map.json \
+            /results/pre_results.json \
+            ''
+    "
 
-echo "row $ROW_INDEX: pre compilation complete"
-echo "  results: $RESULTS_DIR/compile_results_pre.json"
-
-# ── execute on pre ────────────────────────────────────────────
-echo ""
-echo "row $ROW_INDEX: executing tests on pre ($OLD_VERSION)"
-docker run --rm \
-    -v "$STAGED_DIR:/staged:ro" \
-    -v "$RESULTS_DIR:/results" \
-    $PRE_IMAGE \
-    /execute_tests.sh \
-        /results/compile_results_pre.json \
-        /results/fqn_map.json \
-        /results/pre_results.json \
-        ""
-
-echo "row $ROW_INDEX: pre execution complete"
-echo "  results: $RESULTS_DIR/pre_results.json"
-
-# ── filter passing tests ──────────────────────────────────────
-echo ""
-echo "row $ROW_INDEX: filtering passing tests from pre"
+echo "row $ROW_INDEX: filtering passing tests"
 python3 $ACTION_PATH/src/pipeline/filter_tests.py \
     "$RESULTS_DIR/pre_results.json" \
     "$RESULTS_DIR/passing_tests.json"
@@ -153,42 +136,28 @@ with open('$RESULTS_DIR/passing_tests.json') as f:
 print(d['summary']['passing_classes'])
 ")
 
-echo "row $ROW_INDEX: $PASSING_COUNT class(es) passed on pre"
-
 if [ "$PASSING_COUNT" = "0" ]; then
-    echo "row $ROW_INDEX: no passing tests on pre"
-    echo "  skipping breaking stage"
-    echo "  verdict will be INCONCLUSIVE"
-
-    # write empty breaking results so compare_results.py
-    # can still produce a report
+    echo "row $ROW_INDEX: no passing tests on pre, skipping breaking stage"
     python3 -c "
 import json
 result = {
     'main_compile_failed': False,
     'tests': [],
     'summary': {
-        'total_classes':  0,
-        'total_methods':  0,
-        'passed_classes': 0,
-        'failed_classes': 0,
-        'passed_methods': 0,
-        'failed_methods': 0
+        'total_classes': 0, 'total_methods': 0,
+        'passed_classes': 0, 'failed_classes': 0,
+        'passed_methods': 0, 'failed_methods': 0
     }
 }
 with open('$RESULTS_DIR/breaking_results.json', 'w') as f:
     json.dump(result, f, indent=2)
 "
-    # clean up pre image and skip breaking stage
     docker rmi $PRE_IMAGE || true
     exit 0
 fi
 
-# ── build breaking image ──────────────────────────────────────
-echo ""
-echo "row $ROW_INDEX: building breaking image"
+echo "row $ROW_INDEX: building breaking image ($NEW_VERSION)"
 BREAKING_BUILD_FAILED=false
-
 docker build \
     --build-arg JAVA_VERSION=$JAVA_VERSION \
     --build-arg MAVEN_VERSION=$MAVEN_VERSION \
@@ -196,26 +165,21 @@ docker build \
     --build-arg NEW_VERSION=$NEW_VERSION \
     --build-arg LIBRARY_GROUP_ID=$LIBRARY_GROUP_ID \
     --build-arg LIBRARY_NAME=$LIBRARY_NAME \
-    -f $ACTION_PATH/docker/Dockerfile.breaking \
+    -f $ACTION_PATH/docker/breaking-version/Dockerfile.breaking \
     -t $BREAKING_IMAGE \
     $CLIENT_DIR || BREAKING_BUILD_FAILED=true
 
 if [ "$BREAKING_BUILD_FAILED" = "true" ]; then
     echo "row $ROW_INDEX: breaking image build failed"
-    echo "  this may indicate a breaking change at build level"
-
     python3 -c "
 import json
 result = {
     'main_compile_failed': True,
     'tests': [],
     'summary': {
-        'total_classes':  0,
-        'total_methods':  0,
-        'passed_classes': 0,
-        'failed_classes': 0,
-        'passed_methods': 0,
-        'failed_methods': 0
+        'total_classes': 0, 'total_methods': 0,
+        'passed_classes': 0, 'failed_classes': 0,
+        'passed_methods': 0, 'failed_methods': 0
     }
 }
 with open('$RESULTS_DIR/breaking_results.json', 'w') as f:
@@ -225,41 +189,22 @@ with open('$RESULTS_DIR/breaking_results.json', 'w') as f:
     exit 0
 fi
 
-echo "row $ROW_INDEX: breaking image built"
-
-# ── compile on breaking ───────────────────────────────────────
-echo ""
-echo "row $ROW_INDEX: compiling tests on breaking ($NEW_VERSION)"
+echo "row $ROW_INDEX: running breaking stage (compile + execute)"
 docker run --rm \
     -v "$STAGED_DIR:/staged:ro" \
     -v "$RESULTS_DIR:/results" \
     $BREAKING_IMAGE \
-    /compile_tests.sh \
-        /staged \
-        /results/compile_results_breaking.json
+    bash -c "
+        source /root/.sdkman/bin/sdkman-init.sh && \
+        /compile_tests.sh /staged /results/compile_results_breaking.json && \
+        /execute_tests.sh \
+            /results/compile_results_breaking.json \
+            /results/fqn_map.json \
+            /results/breaking_results.json \
+            /results/passing_tests.json
+    "
 
-echo "row $ROW_INDEX: breaking compilation complete"
-
-# ── execute on breaking ───────────────────────────────────────
-echo ""
-echo "row $ROW_INDEX: executing tests on breaking ($NEW_VERSION)"
-docker run --rm \
-    -v "$STAGED_DIR:/staged:ro" \
-    -v "$RESULTS_DIR:/results" \
-    $BREAKING_IMAGE \
-    /execute_tests.sh \
-        /results/compile_results_breaking.json \
-        /results/fqn_map.json \
-        /results/breaking_results.json \
-        /results/passing_tests.json
-
-echo "row $ROW_INDEX: breaking execution complete"
-echo "  results: $RESULTS_DIR/breaking_results.json"
-
-# ── clean up images ───────────────────────────────────────────
-echo ""
 echo "row $ROW_INDEX: cleaning up images"
-docker rmi $PRE_IMAGE     || true
-docker rmi $BREAKING_IMAGE || true
+docker rmi $PRE_IMAGE $BREAKING_IMAGE || true
 
 echo "row $ROW_INDEX: executor pipeline complete"

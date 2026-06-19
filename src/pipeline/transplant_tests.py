@@ -9,61 +9,49 @@ PURPOSE:
     need to derive FQNs from file paths.
 
 DESIGN DECISIONS:
-    1. FQN MAP WRITTEN ALONGSIDE TRANSPLANTED FILES
-       fqn_map.json is written to the results directory after
-       transplanting. It maps file path to FQN:
+    1. STAGED FILES CLEANED IN PLACE BEFORE TRANSPLANTING
+       Markdown fences and explanation text from LLM output are
+       stripped from staged files before transplanting.
+       The cleaned content is written back to the staged file too
+       so compile_tests.sh which mounts the staged directory gets
+       clean Java files.
+       Reason: prompt_llm.py saves raw LLM output as-is. Cleaning
+       happens here as a single central point so both the staged
+       copy and the transplanted copy are always clean.
+
+    2. FQN MAP WRITTEN ALONGSIDE TRANSPLANTED FILES
+       fqn_map.json maps filename to FQN:
          {
-           "R1C1U0BCDetectorTest.java": "com.example.llmtests.R1C1U0BCDetectorTest",
-           ...
+           "R1C0U0BCDetectorTest.java": "com.example.llmtests.R1C0U0BCDetectorTest"
          }
        Reason: FQNs are already known from the manifest. Deriving
-       them from file paths in shell is fragile and error-prone
-       especially for nested packages. Writing them once here
-       means execute_tests.sh just reads the map.
+       them from file paths in shell is fragile. Writing them once
+       here means execute_tests.sh just reads the map.
 
-    2. PACKAGE DECLARATION VERIFIED AND FIXED BEFORE COPY
-       Every file is checked for the correct package declaration
-       before being copied into the client repo.
-       Reason: LLM sometimes writes the wrong package or omits it
-       entirely. A wrong package declaration causes compilation
-       failure even if the file is in the right directory since
+    3. PACKAGE DECLARATION VERIFIED AND FIXED BEFORE COPY
+       Every file is checked for the correct package declaration.
+       Reason: LLM sometimes writes the wrong package or omits it.
+       A wrong package declaration causes compilation failure since
        Java requires the package declaration to match the directory
        structure exactly.
 
-    3. CLASS NAME VERIFIED BEFORE COPY
-       The generated class name is checked against the expected
-       name from the manifest.
-       Reason: LLM sometimes generates a different class name than
-       instructed. A mismatched class name causes compilation
-       failure since Java requires the public class name to match
-       the filename.
+    4. CLASS NAME VERIFIED BEFORE COPY
+       The generated class name is checked against the manifest.
+       Reason: LLM sometimes generates a different class name.
+       A mismatched class name causes compilation failure.
 
-    4. DESTINATION DIRECTORY CREATED IF NOT EXISTS
+    5. DESTINATION DIRECTORY CREATED IF NOT EXISTS
        The full package path under test_source_root is created
        if it does not exist.
-       Reason: the client repo may not have any existing tests
-       under this package. The directory must exist before the
-       file can be copied there.
+       Reason: the client repo may not have existing tests under
+       this package.
 
-    5. CLASH DETECTION
+    6. CLASH DETECTION
        If a file already exists at the destination it is not
        overwritten. The clash is recorded in the output.
        Reason: BCDetectorTest suffix makes clashes very unlikely
-       but not impossible. Silently overwriting an existing file
-       could corrupt the client test suite.
-
-    6. STAGED FILES PRESERVED
-       Original staged files are never modified or deleted.
-       Reason: staged files are the LLM output and should remain
-       intact for debugging. Only copies are placed in the client
-       repo.
-
-    7. MARKDOWN CODE FENCE STRIPPING
-       LLM output sometimes wraps the Java class in markdown
-       code fences. These are stripped before writing.
-       Reason: markdown fences cause immediate compilation failure.
-       Stripping them here means the issue is handled once
-       centrally rather than in every downstream script.
+       but not impossible. Silently overwriting could corrupt the
+       client test suite.
 """
 
 import sys
@@ -75,23 +63,53 @@ from pathlib import Path
 
 def strip_markdown_fences(content):
     """
-    Removes markdown code fences from LLM output.
-    e.g. ```java ... ``` -> just the java code inside
+    Removes markdown code fences and any explanatory text before
+    the first ```java fence from LLM output.
+    Keeps only the raw Java code inside the fences.
     """
-    lines  = content.splitlines()
-    result = []
-    in_fence = False
+    lines       = content.splitlines()
+    result      = []
+    in_fence    = False
+    found_fence = False
 
+    # first pass: look for ```java fence
     for line in lines:
         stripped = line.strip()
-        if not in_fence and stripped.lower().startswith("```"):
-            in_fence = True
+
+        if not in_fence and stripped.lower().startswith("```java"):
+            in_fence    = True
+            found_fence = True
             continue
+
         if in_fence and stripped == "```":
             in_fence = False
             continue
-        if not in_fence:
+
+        if in_fence:
             result.append(line)
+
+    # second pass: if no ```java found try generic ``` fence
+    if not found_fence:
+        in_fence = False
+        for line in lines:
+            stripped = line.strip()
+
+            if not in_fence and stripped == "```":
+                in_fence    = True
+                found_fence = True
+                continue
+
+            if in_fence and stripped == "```":
+                in_fence = False
+                continue
+
+            if in_fence:
+                result.append(line)
+
+    # if still no fence found return content as-is
+    # LLM may have returned raw Java without fences
+    if not found_fence:
+        return content.strip()
 
     return "\n".join(result).strip()
 
@@ -112,15 +130,16 @@ def verify_and_fix_package(content, expected_package, file_path):
             break
 
     if pkg_line_idx is None:
-        print(f"  no package declaration found in {file_path}, injecting")
+        print(f"  no package declaration found, injecting: {expected_decl}",
+              file=sys.stderr)
         content = expected_decl + "\n\n" + content
         return content, True
 
     actual = lines[pkg_line_idx].strip()
     if actual != expected_decl:
-        print(f"  wrong package in {file_path}")
-        print(f"    expected : {expected_decl}")
-        print(f"    found    : {actual}")
+        print(f"  wrong package declaration", file=sys.stderr)
+        print(f"    expected : {expected_decl}", file=sys.stderr)
+        print(f"    found    : {actual}", file=sys.stderr)
         lines[pkg_line_idx] = expected_decl
         return "\n".join(lines), True
 
@@ -137,14 +156,15 @@ def verify_class_name(content, expected_class_name, file_path):
     match   = re.search(pattern, content)
 
     if not match:
-        print(f"  no public class declaration found in {file_path}")
+        print(f"  no public class declaration found in {file_path}",
+              file=sys.stderr)
         return content, False
 
     actual = match.group(1)
     if actual != expected_class_name:
-        print(f"  wrong class name in {file_path}")
-        print(f"    expected : {expected_class_name}")
-        print(f"    found    : {actual}")
+        print(f"  wrong class name", file=sys.stderr)
+        print(f"    expected : {expected_class_name}", file=sys.stderr)
+        print(f"    found    : {actual}", file=sys.stderr)
         content = re.sub(
             r"(public\s+class\s+)\w+",
             r"\1" + expected_class_name,
@@ -181,11 +201,12 @@ def transplant_all(manifest_path, client_dir, results_dir):
                 staged_path       = Path(usage_block["staged_path"])
                 transplant_path   = client_dir / usage_block["transplant_path"]
 
-                print(f"row {row_num} | {test_class_name}")
+                print(f"row {row_num} | {test_class_name}", file=sys.stderr)
 
                 # staged file must exist
                 if not staged_path.exists():
-                    print(f"  staged file not found: {staged_path}")
+                    print(f"  staged file not found: {staged_path}",
+                          file=sys.stderr)
                     failed.append({
                         "test_class_name": test_class_name,
                         "reason":          "staged file not found",
@@ -193,19 +214,12 @@ def transplant_all(manifest_path, client_dir, results_dir):
                     })
                     continue
 
-                # clash detection
-                if transplant_path.exists():
-                    print(f"  clash at destination: {transplant_path}")
-                    clashes.append({
-                        "test_class_name": test_class_name,
-                        "transplant_path": str(transplant_path)
-                    })
-                    continue
-
                 # read staged content
-                content = staged_path.read_text(encoding="utf-8", errors="replace")
+                content = staged_path.read_text(
+                    encoding="utf-8", errors="replace"
+                )
 
-                # strip markdown fences
+                # strip markdown fences and explanation text
                 content = strip_markdown_fences(content)
 
                 # verify and fix package declaration
@@ -218,10 +232,25 @@ def transplant_all(manifest_path, client_dir, results_dir):
                     content, test_class_name, staged_path
                 )
 
+                # write cleaned content back to staged file
+                # so compile_tests.sh gets clean Java when
+                # mounting the staged directory
+                staged_path.write_text(content, encoding="utf-8")
+
+                # clash detection at transplant destination
+                if transplant_path.exists():
+                    print(f"  clash at destination: {transplant_path}",
+                          file=sys.stderr)
+                    clashes.append({
+                        "test_class_name": test_class_name,
+                        "transplant_path": str(transplant_path)
+                    })
+                    continue
+
                 # create destination directory
                 transplant_path.parent.mkdir(parents=True, exist_ok=True)
 
-                # write fixed content to destination
+                # copy cleaned content to destination
                 transplant_path.write_text(content, encoding="utf-8")
 
                 # record in fqn map
@@ -235,7 +264,8 @@ def transplant_all(manifest_path, client_dir, results_dir):
                     "cls_fixed":       cls_fixed
                 })
 
-                print(f"  transplanted -> {transplant_path}")
+                print(f"  transplanted -> {transplant_path}",
+                      file=sys.stderr)
 
     # write fqn map for execute_tests.sh
     fqn_map_path = results_dir / "fqn_map.json"
@@ -257,19 +287,19 @@ def transplant_all(manifest_path, client_dir, results_dir):
     with open(report_path, "w") as f:
         json.dump(report, f, indent=2)
 
-    print(f"\ntransplant complete")
-    print(f"  transplanted : {len(transplanted)}")
-    print(f"  clashes      : {len(clashes)}")
-    print(f"  failed       : {len(failed)}")
-    print(f"  fqn map      : {fqn_map_path}")
+    print(f"\ntransplant complete", file=sys.stderr)
+    print(f"  transplanted : {len(transplanted)}", file=sys.stderr)
+    print(f"  clashes      : {len(clashes)}", file=sys.stderr)
+    print(f"  failed       : {len(failed)}", file=sys.stderr)
+    print(f"  fqn map      : {fqn_map_path}", file=sys.stderr)
 
     if failed:
         sys.exit(1)
 
 
 if __name__ == "__main__":
-    manifest_path = sys.argv[1]   # /tmp/llmbreakguard/manifest.json
-    client_dir    = sys.argv[2]   # $GITHUB_WORKSPACE/clients/client_0
-    results_dir   = sys.argv[3]   # /tmp/llmbreakguard/results_0
+    manifest_path = sys.argv[1]   # workspace/manifest.json
+    client_dir    = sys.argv[2]   # workspace/clients/wsdoc_0
+    results_dir   = sys.argv[3]   # workspace/results_0
 
     transplant_all(manifest_path, client_dir, results_dir)

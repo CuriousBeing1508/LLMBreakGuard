@@ -216,7 +216,8 @@ runs:
                 /tmp/llmbreakguard/results_${ROW_IDX}/pre_results.json \
                 /tmp/llmbreakguard/results_${ROW_IDX}/breaking_results.json \
                 /tmp/llmbreakguard/manifest.json \
-                /tmp/llmbreakguard/results_${ROW_IDX}/bc_report_${ROW_IDX}.json
+                /tmp/llmbreakguard/results_${ROW_IDX}/bc_report_${ROW_IDX}.json \
+                /tmp/llmbreakguard/results_${ROW_IDX}/passing_tests.json
         done
 
     - name: Generate report

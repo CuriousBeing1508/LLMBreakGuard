@@ -151,8 +151,7 @@ public class {test_class_name} {{
  * Generate tests that detect breaking changes in {library_name}
  * between version {old_version} and {new_version}.
  *
- * Focus on the focal method: {method_name}
- * which calls the library APIs listed in section 4.
+ * Focus on the focal method: {method_name} which calls the library APIs listed in section 4.
  *
  * Requirements:
  * - Output ONLY a complete compilable Java test class.
