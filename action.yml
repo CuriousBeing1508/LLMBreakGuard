@@ -48,6 +48,21 @@ runs:
 
     # ── detect mode ──────────────────────────────────────────
 
+    - name: Set up python3
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+
+    - name: Install Python dependencies
+      shell: bash
+      run: pip install -r ${{ github.action_path }}/requirements.txt
+
+    - name: Set up java
+      uses: actions/setup-java@v4
+      with:
+        distribution: temurin
+        java-version: '17'
+
     - name: Parse config
       if: inputs.mode == 'detect'
       shell: bash
@@ -223,8 +238,6 @@ runs:
     - name: Generate report
       if: inputs.mode == 'run'
       shell: bash
-      env:
-        GITHUB_STEP_SUMMARY: ${{ github.step_summary }}
       run: |
         python3 ${{ github.action_path }}/src/reporting/generate_report.py \
           /tmp/llmbreakguard \

@@ -244,6 +244,7 @@ result = {
 with open('${RESULTS_DIR}/breaking_results.json', 'w') as f:
     json.dump(result, f, indent=2)
 "
+        docker rmi "llmbreakguard-pre-${ROW_IDX}" || true
     else
         echo ""
         echo "[11/13] building breaking image — row $ROW_IDX ($LIBRARY_NAME $NEW_VERSION)"

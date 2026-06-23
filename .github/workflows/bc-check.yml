@@ -1,0 +1,29 @@
+name: Breaking Change Check
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'detect or run'
+        required: true
+        default: detect
+        type: choice
+        options:
+          - detect
+          - run
+
+jobs:
+  bc-check:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: CuriousBeing1508/LLMBreakGuard@main
+        with:
+          config-file:          bc-config.csv
+          mode:                 ${{ inputs.mode }}
+          resolved-config-file: bc-config-resolved.csv
+          llm-api-key:          ${{ secrets.ANTHROPIC_API_KEY }}

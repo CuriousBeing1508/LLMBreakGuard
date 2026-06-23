@@ -4,14 +4,22 @@ ARG JAVA_VERSION=17
 ARG MAVEN_VERSION=3.9.6
 
 RUN bash -c "source /root/.sdkman/bin/sdkman-init.sh \
-    && JAVA_ID=\$(sdk list java | grep -E '${JAVA_VERSION}\.[0-9].*-tem' | head -1 | awk '{print \$NF}') \
-    && echo \"Installing Java: \$JAVA_ID\" \
-    && sdk install java \$JAVA_ID \
-    && sdk default java \$JAVA_ID"
+    && if sdk current java 2>/dev/null | grep -q '^${JAVA_VERSION}\.'; then \
+        echo 'Java ${JAVA_VERSION} already active from base image'; \
+    else \
+        JAVA_ID=\$(sdk list java | grep -E '${JAVA_VERSION}\.[0-9].*-tem' | head -1 | awk '{print \$NF}') \
+        && echo \"Installing Java: \$JAVA_ID\" \
+        && sdk install java \$JAVA_ID \
+        && sdk default java \$JAVA_ID; \
+    fi"
 
 RUN bash -c "source /root/.sdkman/bin/sdkman-init.sh \
-    && sdk install maven ${MAVEN_VERSION} \
-    && sdk default maven ${MAVEN_VERSION}"
+    && if sdk current maven 2>/dev/null | grep -q '^${MAVEN_VERSION}$'; then \
+        echo 'Maven ${MAVEN_VERSION} already active from base image'; \
+    else \
+        sdk install maven ${MAVEN_VERSION} \
+        && sdk default maven ${MAVEN_VERSION}; \
+    fi"
 
 COPY . /project
 WORKDIR /project

@@ -54,9 +54,72 @@ DESIGN DECISIONS:
                  right next to it.
 """
 
+import re
 import sys
 import json
 from pathlib import Path
+
+
+def _split_params_smart(param_str):
+    """Split comma-separated params respecting angle bracket nesting."""
+    params, depth, current = [], 0, []
+    for ch in param_str:
+        if ch == '<':
+            depth += 1
+            current.append(ch)
+        elif ch == '>':
+            depth -= 1
+            current.append(ch)
+        elif ch == ',' and depth == 0:
+            params.append(''.join(current).strip())
+            current = []
+        else:
+            current.append(ch)
+    if current:
+        params.append(''.join(current).strip())
+    return [p for p in params if p]
+
+
+def parse_focal_method_signature(method_source, method_name):
+    """
+    Extracts method_name(ParamType1, ParamType2): ReturnType from source.
+    Falls back to just method_name if parsing fails.
+    """
+    flat = ' '.join(method_source.split())
+
+    pattern = (
+        r'(?:(?:public|private|protected|static|final|synchronized|'
+        r'abstract|native|default|transient|volatile|strictfp|@\w+)\s+)*'
+        r'([\w<>\[\]?,\s.]+?)\s+'
+        r'(?<!\.)' + re.escape(method_name) + r'\s*\('
+    )
+    m = re.search(pattern, flat)
+    if not m:
+        return method_name
+
+    return_type = m.group(1).strip()
+
+    # find matching ) starting from right after the opening (
+    start, depth, i = m.end(), 1, m.end()
+    while i < len(flat) and depth > 0:
+        if flat[i] == '(':
+            depth += 1
+        elif flat[i] == ')':
+            depth -= 1
+        i += 1
+
+    param_str = flat[start:i - 1].strip()
+    if param_str:
+        param_types = []
+        for p in _split_params_smart(param_str):
+            p = re.sub(r'@\w+\s*', '', p).strip()
+            parts = p.rsplit(None, 1)
+            param_types.append(parts[0].strip() if len(parts) == 2 else p)
+        params_str = ', '.join(param_types)
+    else:
+        params_str = ''
+
+    return f"{method_name}({params_str}): {return_type}"
 
 
 def build_dependency_signatures(library_usages):
@@ -104,6 +167,9 @@ def generate_prompt(row_entry, class_entry, usage_block):
     new_version       = row_entry["new_version"]
     client_class_fqn  = class_entry["class_fqn"]
 
+    method_sig       = parse_focal_method_signature(method_source, method_name)
+    focal_method_fqn = f"{client_class_fqn}#{method_sig}"
+
     deps = build_dependency_signatures(library_usages)
     deps_str = (
         "\n".join(f"    {d}" for d in deps)
@@ -118,7 +184,7 @@ def generate_prompt(row_entry, class_entry, usage_block):
 
 ---- 2. Program context ----
 - Focal class FQN    : {client_class_fqn}
-- Focal method       : {method_name}
+- Focal method FQN   : {focal_method_fqn}
 - Test package       : {test_package_name}
 - Test class name    : {test_class_name}
 
@@ -151,7 +217,7 @@ public class {test_class_name} {{
  * Generate tests that detect breaking changes in {library_name}
  * between version {old_version} and {new_version}.
  *
- * Focus on the focal method: {method_name} which calls the library APIs listed in section 4.
+ * Focus on the focal method: {focal_method_fqn} which calls the library APIs listed in section 4.
  *
  * Requirements:
  * - Output ONLY a complete compilable Java test class.
