@@ -182,9 +182,10 @@ for i, (c, r) in enumerate(zip(configs, manifest['rows'])):
         c['library_group_id'],
         c['library_name'],
         c['old_version'],
-        c['new_version']
+        c['new_version'],
+        r['pre_client_dir']
     )
-" | while read ROW_IDX CLIENT_NAME JAVA_VERSION MAVEN_VERSION LIBRARY_GROUP LIBRARY_NAME OLD_VERSION NEW_VERSION; do
+" | while read ROW_IDX CLIENT_NAME JAVA_VERSION MAVEN_VERSION LIBRARY_GROUP LIBRARY_NAME OLD_VERSION NEW_VERSION PRE_CLIENT_DIR; do
 
     CLIENT_DIR="workspace/clients/${CLIENT_NAME}_${ROW_IDX}"
     RESULTS_DIR="workspace/results_${ROW_IDX}"
@@ -197,7 +198,7 @@ for i, (c, r) in enumerate(zip(configs, manifest['rows'])):
         --build-arg MAVEN_VERSION=$MAVEN_VERSION \
         -f "$(pwd)/docker/pre-version/Dockerfile.pre" \
         -t "llmbreakguard-pre-${ROW_IDX}" \
-        "$CLIENT_DIR" 2>&1
+        "$PRE_CLIENT_DIR" 2>&1
 
     echo ""
     echo "[9/13] running tests on pre version — row $ROW_IDX ($OLD_VERSION)"
@@ -219,7 +220,8 @@ for i, (c, r) in enumerate(zip(configs, manifest['rows'])):
     echo "[10/13] filtering passing tests — row $ROW_IDX"
     python3 src/pipeline/filter_tests.py \
         "${RESULTS_DIR}/pre_results.json" \
-        "${RESULTS_DIR}/passing_tests.json"
+        "${RESULTS_DIR}/passing_tests.json" \
+        "workspace/staged_tests/staged_${ROW_IDX}"
 
     PASSING=$(python3 -c "
 import json

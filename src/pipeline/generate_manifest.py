@@ -152,7 +152,12 @@ def generate_manifest(configs_path, analysis_root, staged_root,
     for row_idx, entry in enumerate(configs):
         row_num     = row_idx + 1
         client_name = entry["clone_url"].split("/")[-1].replace(".git", "")
-        client_dir  = Path(workspace) / "clients" / f"{client_name}_{row_idx}"
+        client_dir          = Path(workspace) / "clients" / f"{client_name}_{row_idx}"
+        _pre_worktree       = Path(workspace) / "clients" / f"{client_name}_{row_idx}_pre"
+        # Use the worktree created by run_static_analysis if it exists.
+        # If not, client_dir is already at the pre state (old_version in pom.xml)
+        # and Dockerfile.breaking will override to new_version.
+        pre_client_dir      = _pre_worktree if _pre_worktree.exists() else client_dir
 
         # validate required user-confirmed fields before doing anything
         validate_required_fields(entry, row_num)
@@ -190,6 +195,8 @@ def generate_manifest(configs_path, analysis_root, staged_root,
         row_entry = {
             "row_index":          row_num,
             "client_name":        client_name,
+            "client_dir":         str(client_dir),
+            "pre_client_dir":     str(pre_client_dir),
             "client_github_url":  entry["client_github_url"],
             "library_name":       entry["library_name"],
             "library_group_id":   entry["library_group_id"],

@@ -70,6 +70,7 @@
 #   $9  -> library_name
 #   $10 -> old_version
 #   $11 -> new_version
+#   $12 -> pre_client_dir (client repo checked out at pre_breaking_commit^1)
 
 #!/bin/bash
 set -e
@@ -85,6 +86,7 @@ LIBRARY_GROUP_ID=$8
 LIBRARY_NAME=$9
 OLD_VERSION=${10}
 NEW_VERSION=${11}
+PRE_CLIENT_DIR=${12}
 
 PRE_IMAGE="llmbreakguard-pre-${ROW_INDEX}"
 BREAKING_IMAGE="llmbreakguard-breaking-${ROW_INDEX}"
@@ -107,7 +109,7 @@ docker build \
     --build-arg MAVEN_VERSION=$MAVEN_VERSION \
     -f $ACTION_PATH/docker/pre-version/Dockerfile.pre \
     -t $PRE_IMAGE \
-    $CLIENT_DIR
+    $PRE_CLIENT_DIR
 
 echo "row $ROW_INDEX: running pre stage (compile + execute)"
 docker run --rm \
@@ -127,7 +129,8 @@ docker run --rm \
 echo "row $ROW_INDEX: filtering passing tests"
 python3 $ACTION_PATH/src/pipeline/filter_tests.py \
     "$RESULTS_DIR/pre_results.json" \
-    "$RESULTS_DIR/passing_tests.json"
+    "$RESULTS_DIR/passing_tests.json" \
+    "$STAGED_DIR"
 
 PASSING_COUNT=$(python3 -c "
 import json
