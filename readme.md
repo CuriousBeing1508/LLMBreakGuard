@@ -5,7 +5,7 @@ Detects breaking changes in OSS library upgrades **before** shipping to producti
 Given a Java client project and a library version bump (e.g. `jackson-databind 2.4.2 → 2.12.6`), LLMBreakGuard:
 
 1. Clones the client repo and runs [Spoon](https://spoon.gforge.inria.fr/) static analysis to find every place the library is used
-2. Asks an LLM (Claude) to generate JUnit/TestNG test classes targeting those exact API calls
+2. Asks an LLM (GPT4o/Claude) to generate UNIT test classes targeting those exact API calls
 3. Compiles and runs the tests against the **old** library version (baseline)
 4. Compiles and runs the same tests against the **new** library version
 5. Compares results — any test that passed on the old version but fails on the new version is reported as a breaking change
